@@ -28,6 +28,9 @@ dev = [
 # =====================================================================
 # Ruff — Lint + Format
 # =====================================================================
+[tool.setuptools]
+py-modules = ["dataset", "train", "eval", "prepare_data", "split_dataset", "download_images", "create_dataset"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
