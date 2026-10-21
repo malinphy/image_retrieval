@@ -1,0 +1,115 @@
+# =====================================================================
+# CI Workflow — IMAGE_RETRIEVAL
+# =====================================================================
+# This workflow is in GitHub Actions format but is currently NOT pushed.
+# To run the same steps manually for local validation:
+#   1. python -m pip install -e ".[dev]"
+#   2. ruff check .
+#   3. ruff format --check .
+#   4. pytest -m "not slow" --cov=. --cov-report=xml --cov-report=term
+#
+# NOTE: When you want to push this workflow to GitHub:
+#   - add the .github/workflows/ directory to git
+#   - do not add AWS_ACCOUNT_ID etc. to secrets (already removed from config.yaml)
+# =====================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel in-progress runs for the same branch on new pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -----------------------------------------------------------------
+  # 1. Lint + Format (ruff)
+  # -----------------------------------------------------------------
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: python -m pip install "ruff>=0.6.0"
+
+      - name: Ruff check
+        run: ruff check . --output-format=github
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+  # -----------------------------------------------------------------
+  # 2. Unit + Smoke tests (pytest)
+  # -----------------------------------------------------------------
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install numpy pandas pyarrow pyyaml pillow transformers tqdm
+          python -m pip install -e ".[dev]"
+
+      - name: Run tests (skip slow)
+        env:
+          # Tests must pass even when S3_BUCKET is not defined in CI.
+          # _resolve_env_placeholders is only called in train.py main().
+          PYTHONHASHSEED: "0"
+        run: |
+          pytest \
+            -m "not slow" \
+            --cov=. \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=60 \
+            -v
+
+      - name: Upload coverage to Codecov
+        if: success()
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # -----------------------------------------------------------------
+  # 3. Secret scan (gitleaks)
+  # -----------------------------------------------------------------
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,37 @@
+{
+    "model": "openai/clip-vit-large-patch14",
+    "queries": 448,
+    "corpus_images": 8725,
+    "products_missing_image": 0,
+    "global_vector_retrieval": {
+        "corpus_size": 8725,
+        "queries_evaluated": 448,
+        "queries_with_exact_match": 447,
+        "NDCG@10": 0.5429857548677767,
+        "NDCG@20": 0.5913989509096783,
+        "MRR": 0.8028004854488523,
+        "Recall@1": 0.09083048129980496,
+        "Recall@5": 0.32977536008238184,
+        "Recall@10": 0.5072689965103567,
+        "Recall@20": 0.6805799372455416,
+        "Recall@50": 0.814720931309494,
+        "Recall@100": 0.873495126457833,
+        "HitRate@1": 0.48769574944071586,
+        "HitRate@5": 0.8187919463087249,
+        "HitRate@10": 0.883668903803132,
+        "HitRate@20": 0.9217002237136466,
+        "HitRate@50": 0.9395973154362416
+    },
+    "candidate_reranking": {
+        "queries_evaluated": 448,
+        "NDCG@10": 0.727641920525914,
+        "NDCG@20": 0.8005338172799709,
+        "Recall@1": 0.1178297610145564,
+        "Recall@5": 0.44449035237626283,
+        "Recall@10": 0.7006598857595031,
+        "HitRate@1": 0.6062639821029083,
+        "HitRate@5": 0.9284116331096197,
+        "HitRate@10": 0.9753914988814317,
+        "MRR": 0.9404637896825397
+    }
+}

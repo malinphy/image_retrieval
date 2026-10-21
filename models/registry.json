@@ -1,0 +1,1 @@
+{"schema_version": "1.0", "models": [{"version": "v1.0.0", "config_snapshot": {"model_name": "openai/clip-vit-large-patch14", "training_mode": "lora", "loss_type": "infonce", "learning_rate": 0.0001, "batch_size": 64, "lora_r": 16, "lora_alpha": 32, "lora_dropout": 0.05, "num_epochs": 5, "seed": 42}}], "production": null}

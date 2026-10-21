@@ -1,0 +1,53 @@
+# =====================================================================
+# CLIP Fine-Tuning Configuration (config.yaml)
+# =====================================================================
+
+experiment_name: "clip_esci_finetune"
+model_name: "openai/clip-vit-large-patch14"
+
+# Training Mode:
+#   - "lora"            : LoRA adapters on Vision & Text attention + Projections (Recommended)
+#   - "projection_only" : Freeze backbones, train only visual_projection & text_projection
+#   - "full"            : Unfreeze and train all model parameters
+training_mode: "lora"
+
+# LoRA Hyperparameters (used when training_mode == "lora")
+lora_r: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules:
+  - "q_proj"
+  - "k_proj"
+  - "v_proj"
+  - "out_proj"
+
+# Optimization Hyperparameters
+epochs: 5
+batch_size: 64
+eval_batch_size: 128
+learning_rate: 1.0e-4
+weight_decay: 0.01
+warmup_ratio: 0.1
+max_grad_norm: 1.0
+mixed_precision: true
+gradient_checkpointing: true
+seed: 42
+
+# Data & Loader Settings
+positive_only: true            # Train on 'E' (Exact match) pairs
+num_workers: 4                 # Automatically set to 0 on CPU / Windows dry-run
+max_train_samples: null        # Set to e.g. 64 for a fast local CPU dry-run, or null for full dataset
+max_val_samples: null          # Set to e.g. 32 for a fast local CPU dry-run, or null for full dataset
+
+# Checkpointing & Evaluation
+save_every_epoch: true
+compute_val_loss_every_epoch: true
+compute_val_retrieval_every_epoch: true
+best_metric: "val_loss"        # "val_loss" (min) or "val_NDCG@10" (max) or "val_Recall@10" (max)
+
+# S3 / Cloud Settings
+# s3_bucket: overridden by the S3_BUCKET env variable (security)
+# May be left empty for local development and CI.
+s3_bucket: "${S3_BUCKET}"
+s3_images_tar_key: "data/images_bundle.tar"
+s3_checkpoints_prefix: "checkpoints"

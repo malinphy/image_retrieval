@@ -1,0 +1,8 @@
+{
+    "mode": "train_e_val_test",
+    "targeted_unique_products": 81082,
+    "already_present": 8725,
+    "newly_downloaded": 72329,
+    "total_images_on_disk": 81054,
+    "failed": 28
+}

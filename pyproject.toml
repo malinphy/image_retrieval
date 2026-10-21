@@ -1,0 +1,123 @@
+# =====================================================================
+# pyproject.toml — IMAGE_RETRIEVAL
+# Single config file: ruff (lint+format) + pytest + coverage + mypy
+# =====================================================================
+
+[project]
+name = "image-retrieval"
+version = "0.1.0"
+description = "E-Commerce Image Retrieval via CLIP Fine-Tuning"
+requires-python = ">=3.12"
+readme = "README.md"
+
+# CI/CD tooling (runtime dependencies live in requirements.txt)
+dependencies = [
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.10.0",
+]
+
+# =====================================================================
+# Ruff — Lint + Format
+# =====================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "data/",
+    "checkpoints/",
+    "analysis/",
+    "venv/",
+    ".venv/",
+    "scripts/launch_sagemaker.py",  # wide boto3 + AWS SDK type surface
+]
+
+[tool.ruff.lint]
+# E = pycodestyle errors, W = warnings, F = pyflakes, I = isort
+# B = flake8-bugbear, UP = pyupgrade, SIM = simplify, RUF = ruff-specific
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PL"]
+ignore = [
+    "E501",    # line-length (ruff format handles it)
+    "PLR0913", # too-many-arguments (unavoidable in ML config functions)
+    "PLR2004", # magic value (useful in tests)
+    "SIM108",  # ternary if-else (sometimes preferred for readability)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["PLR2004", "B011"]  # magic values and bare assert are fine in tests
+"scripts/**/*.py" = ["PL"]             # keep pylint rules relaxed in scripts
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+
+# =====================================================================
+# Pytest
+# =====================================================================
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",                  # summary for all fail reasons
+    "--strict-markers",     # error out on unregistered markers
+    "--strict-config",      # surface config errors
+    "--showlocals",         # show local variables on failure
+    "--tb=short",           # short traceback
+    "-m", "not smoke",      # skip smoke tests by default
+                            # (they download a model and are slow). Enable via:
+                            #   pytest -m smoke
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks integration tests (require data/)",
+    "smoke: marks smoke tests (tiny model, CPU)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:transformers.*",
+    "ignore::FutureWarning:transformers.*",
+    "ignore::UserWarning:torch.*",
+]
+
+# =====================================================================
+# Coverage
+# =====================================================================
+[tool.coverage.run]
+source = ["dataset.py", "train.py", "eval.py", "prepare_data.py", "split_dataset.py"]
+omit = [
+    "scripts/*",
+    "tests/*",
+    "venv/*",
+    "data/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false
+fail_under = 60  # start at 60% for an ML project, raise it over time
+
+# =====================================================================
+# MyPy (optional — enable in phase 2)
+# =====================================================================
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true

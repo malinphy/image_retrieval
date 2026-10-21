@@ -1,0 +1,147 @@
+# =====================================================================
+# Promote Workflow — IMAGE_RETRIEVAL (CT)
+# =====================================================================
+# Manual model promotion: mark a model in the registry as "production".
+# Triggered via workflow_dispatch (there is NO automatic promotion).
+#
+# REQUIRED GITHUB SECRETS:
+#   - AWS_ACCESS_KEY_ID
+#   - AWS_SECRET_ACCESS_KEY
+#   - S3_BUCKET
+#
+# OPTIONAL:
+#   - AWS_REGION (default: us-west-2)
+#   - SLACK_WEBHOOK_URL
+# =====================================================================
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Model version to promote (e.g. v1.2.3)"
+        required: true
+        type: string
+      reason:
+        description: "Promotion reason (for the audit trail)"
+        required: true
+        type: string
+      action:
+        description: "Action type"
+        required: true
+        type: choice
+        default: "promote"
+        options:
+          - promote      # set promoted=true + production in the registry
+          - rollback     # revert production to the previous version
+
+# Permissions
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-west-2' }}
+
+jobs:
+  promote:
+    name: Promote model
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install boto3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Show current production
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "Current production model:"
+          python scripts/promote_model.py --current
+
+      - name: Verify target version exists
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "Target version: $VERSION"
+          python scripts/promote_model.py --show "$VERSION"
+
+      - name: Promote / Rollback
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          VERSION: ${{ inputs.version }}
+          REASON: ${{ inputs.reason }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          if [ "$ACTION" = "rollback" ]; then
+            echo "Rolling back production to $VERSION"
+            python scripts/promote_model.py \
+              --set-production "$VERSION" \
+              --reason "ROLLBACK: $REASON"
+          else
+            echo "Promoting $VERSION to production"
+            python scripts/promote_model.py \
+              --promote "$VERSION" \
+              --reason "$REASON"
+          fi
+
+      - name: Verify promotion
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "After promotion:"
+          python scripts/promote_model.py --current
+          echo ""
+          echo "All models:"
+          python scripts/promote_model.py --list
+
+      - name: Slack notification
+        if: env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          VERSION: ${{ inputs.version }}
+          REASON: ${{ inputs.reason }}
+          ACTION: ${{ inputs.action }}
+        run: |
+          EMOJI=":rocket:"
+          [ "$ACTION" = "rollback" ] && EMOJI=":warning:"
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \"${EMOJI} Model ${ACTION}: \`${VERSION}\`\nReason: ${REASON}\nActor: ${{ github.actor }}\"
+            }"
+
+      - name: Summary
+        run: |
+          echo "## Promotion Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Action**: ${{ inputs.action }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version**: \`${{ inputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Reason**: ${{ inputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Actor**: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_STEP_SUMMARY"

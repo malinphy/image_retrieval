@@ -1,0 +1,341 @@
+# =====================================================================
+# CD Workflow — IMAGE_RETRIEVAL
+# =====================================================================
+# After merging to the main branch, automatically:
+#   1. AWS auth (access key from GitHub Secrets)
+#   2. Package the source code + upload to S3 (launch_sagemaker.py)
+#   3. Start the SageMaker Training Job
+#   4. Wait for the job to finish + collect logs
+#   5. Verify the model artifact in S3
+#   6. On failure: write a rollback marker + notify via Slack/issue
+#
+# REQUIRED GITHUB SECRETS:
+#   - AWS_ACCESS_KEY_ID
+#   - AWS_SECRET_ACCESS_KEY
+#   - S3_BUCKET
+#   - SAGEMAKER_ROLE_ARN
+#
+# OPTIONAL:
+#   - AWS_REGION (default: us-west-2)
+#   - SLACK_WEBHOOK_URL (failure notification)
+# =====================================================================
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    # Only real code changes should trigger this (skip docs-only commits)
+    paths:
+      - "train.py"
+      - "eval.py"
+      - "dataset.py"
+      - "download_images.py"
+      - "config.yaml"
+      - "scripts/launch_sagemaker.py"
+      - "requirements.txt"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    # Manual trigger: Actions UI -> Run workflow -> pick a mode
+    inputs:
+      mode:
+        description: "SageMaker job mode"
+        required: true
+        type: choice
+        default: "train"
+        options:
+          - train
+          - eval
+          - download
+      instance_type:
+        description: "Instance type (empty = automatic)"
+        required: false
+        type: string
+        default: ""
+
+# Cancel in-progress runs for the same branch (when a new push arrives)
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false  # cancelling a deploy is dangerous, wait instead
+
+# Permissions: only what is needed
+permissions:
+  contents: read
+  id-token: write  # for OIDC (future)
+
+# Shared environment variables
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || secrets.AWS_REGION || 'us-west-2' }}
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # -----------------------------------------------------------------
+  # 1. Pre-flight checks (post-merge sanity)
+  # -----------------------------------------------------------------
+  preflight:
+    name: Pre-flight checks
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.name.outputs.short_sha }}
+      job_name: ${{ steps.name.outputs.job_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # to allow access to git log
+
+      - name: Generate job name
+        id: name
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          MODE="${{ inputs.mode || 'train' }}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "job_name=clip-${MODE}-${SHORT_SHA}-${TIMESTAMP}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate secrets present
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+        run: |
+          if [ -z "$S3_BUCKET" ]; then
+            echo "::error::S3_BUCKET secret is missing"
+            exit 1
+          fi
+          if [ -z "$ROLE_ARN" ]; then
+            echo "::error::SAGEMAKER_ROLE_ARN secret is missing"
+            exit 1
+          fi
+          echo "Secrets OK. Bucket: $S3_BUCKET"
+
+      - name: Verify config.yaml has no hardcoded secrets
+        run: |
+          # Check for AWS account ID (12-digit number) leaks
+          if grep -E '\b[0-9]{12}\b' config.yaml; then
+            echo "::error::AWS account ID detected in config.yaml!"
+            exit 1
+          fi
+          # Does the S3 bucket name contain an account ID?
+          if grep -E 's3://.*[0-9]{12}' config.yaml; then
+            echo "::error::S3 URI containing an account ID detected in config.yaml!"
+            exit 1
+          fi
+          echo "config.yaml clean."
+
+  # -----------------------------------------------------------------
+  # 2. Deploy — SageMaker Training Job
+  # -----------------------------------------------------------------
+  deploy:
+    name: Deploy to SageMaker
+    needs: preflight
+    runs-on: ubuntu-latest
+    # 8-hour timeout (SageMaker max_run_seconds=28800)
+    timeout-minutes: 540
+    outputs:
+      model_version: ${{ steps.bump.outputs.version }}
+      bump_type: ${{ steps.bump.outputs.bump_type }}
+    environment:
+      name: production
+      url: https://${{ secrets.S3_BUCKET }}.s3.${{ env.AWS_REGION }}.amazonaws.com/
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install boto3 pyyaml
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+          echo "AWS auth OK."
+
+      # The version is computed from the registry in S3 (the single source of
+      # truth) and written back there. The same config twice does not bump it.
+      - name: Register model version (CT)
+        id: bump
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "Computing model version..."
+          python scripts/bump_version.py --auto --s3-bucket "$S3_BUCKET"
+          echo "Version: ${{ steps.bump.outputs.version }} (bump: ${{ steps.bump.outputs.bump_type }})"
+
+      - name: Launch SageMaker job
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+          MODE: ${{ inputs.mode || 'train' }}
+          INSTANCE_TYPE: ${{ inputs.instance_type || '' }}
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          MODEL_VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          echo "Launching SageMaker job: $JOB_NAME (mode=$MODE, version=$MODEL_VERSION)"
+          EXTRA_ARGS=""
+          if [ -n "$INSTANCE_TYPE" ]; then
+            EXTRA_ARGS="--instance-type $INSTANCE_TYPE"
+          fi
+          # We do NOT use --follow: it would block CI, we collect logs below
+          python scripts/launch_sagemaker.py \
+            --mode "$MODE" \
+            --job-name "$JOB_NAME" \
+            $EXTRA_ARGS
+
+      - name: Wait for job completion
+        env:
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "Waiting for SageMaker job: $JOB_NAME"
+          python - <<'PY'
+          import os
+          import sys
+          import time
+          import boto3
+
+          job_name = os.environ["JOB_NAME"]
+          region = os.environ["AWS_REGION"]
+          client = boto3.client("sagemaker", region_name=region)
+
+          terminal = {"Completed", "Failed", "Stopped"}
+          start = time.time()
+          max_wait = 8 * 3600  # 8 hours
+
+          while True:
+              desc = client.describe_training_job(TrainingJobName=job_name)
+              status = desc["TrainingJobStatus"]
+              secondary = desc.get("SecondaryStatus", "")
+              elapsed = int(time.time() - start)
+              print(f"[{elapsed:>5}s] {status} ({secondary})", flush=True)
+
+              if status in terminal:
+                  if status != "Completed":
+                      print(f"::error::Job ended with status: {status}", file=sys.stderr)
+                      print(f"FailureReason: {desc.get('FailureReason', 'N/A')}", file=sys.stderr)
+                      sys.exit(1)
+                  break
+
+              if elapsed > max_wait:
+                  print("::error::Timeout waiting for job", file=sys.stderr)
+                  sys.exit(1)
+
+              time.sleep(30)
+          PY
+
+      - name: Download CloudWatch logs
+        if: always()
+        env:
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          mkdir -p ci-artifacts/logs
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import boto3
+
+          job_name = os.environ["JOB_NAME"]
+          region = os.environ["AWS_REGION"]
+          logs = boto3.client("logs", region_name=region)
+
+          out = Path("ci-artifacts/logs") / f"{job_name}.log"
+          out.parent.mkdir(parents=True, exist_ok=True)
+
+          try:
+              resp = logs.filter_log_events(
+                  logGroupName="/aws/sagemaker/TrainingJobs",
+                  logStreamNamePrefix=job_name,
+              )
+              with out.open("w", encoding="utf-8") as f:
+                  for ev in resp.get("events", []):
+                      f.write(ev["message"].rstrip() + "\n")
+              print(f"Logs saved: {out} ({out.stat().st_size} bytes)")
+          except Exception as e:
+              print(f"::warning::Log download failed: {e}")
+          PY
+
+      - name: Verify model artifact in S3
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          echo "Checking S3 for model artifacts..."
+          aws s3 ls "s3://$S3_BUCKET/sagemaker-output/$JOB_NAME/" --recursive || {
+            echo "::error::Model artifact not found in S3"
+            exit 1
+          }
+
+      - name: Upload CI artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deploy-${{ needs.preflight.outputs.job_name }}
+          path: ci-artifacts/
+          retention-days: 30
+
+  # -----------------------------------------------------------------
+  # 3. Post-deploy — notification + rollback marker
+  # -----------------------------------------------------------------
+  notify:
+    name: Notify + Rollback marker
+    needs: [preflight, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Write rollback marker on failure
+        if: failure()
+        env:
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          # Rollback marker: write failed-{sha}.json into the deployments/ folder in S3
+          # For a manual rollback: aws sagemaker stop-training-job --training-job-name <previous>
+          cat > /tmp/rollback.json <<EOF
+          {
+            "failed_sha": "$SHORT_SHA",
+            "failed_job": "$JOB_NAME",
+            "failed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "rollback_action": "Revert merge commit and re-deploy previous main HEAD"
+          }
+          EOF
+          aws s3 cp /tmp/rollback.json \
+            "s3://$S3_BUCKET/deployments/failed-$SHORT_SHA.json"
+          echo "Rollback marker written."
+
+      - name: Slack notification on failure
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_NAME: ${{ needs.preflight.outputs.job_name }}
+          SHORT_SHA: ${{ needs.preflight.outputs.short_sha }}
+        run: |
+          curl -X POST "$SLACK_WEBHOOK_URL" \
+            -H 'Content-Type: application/json' \
+            -d "{
+              \"text\": \":rotating_light: Deploy FAILED\nJob: $JOB_NAME\nSHA: $SHORT_SHA\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"
+            }"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Deploy Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Job**: \`${{ needs.preflight.outputs.job_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SHA**: \`${{ needs.preflight.outputs.short_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Model version**: \`${{ needs.deploy.outputs.model_version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Status**: ${{ needs.deploy.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Region**: ${{ env.AWS_REGION }}" >> "$GITHUB_STEP_SUMMARY"
