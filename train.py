@@ -31,7 +31,7 @@ import random
 import re
 import tarfile
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -228,7 +228,7 @@ def save_checkpoint(model: CLIPModel, cfg: dict, metrics: dict, save_dir: Path):
         "version": model_version,
         "git_sha": os.environ.get("GITHUB_SHA", os.environ.get("GIT_COMMIT", "local"))[:7],
         "git_branch": os.environ.get("GITHUB_REF_NAME", os.environ.get("GIT_BRANCH", "local")),
-        "trained_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "trained_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "trained_by": os.environ.get("GITHUB_ACTOR", os.environ.get("USER", "local")),
         "config_hash": _config_hash(cfg),
         "sagemaker_job": os.environ.get("SM_TRAINING_JOB_NAME", None),
